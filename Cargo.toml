@@ -1,0 +1,11 @@
+[package]
+name = "ableton"
+version = "0.1.0"
+edition = "2021"
+description = "Low-latency Rust client for Ableton Live via AbletonOSC"
+license = "MIT"
+
+[dependencies]
+rosc = "0.10"
+thiserror = "2"
+serde_json = "1"
