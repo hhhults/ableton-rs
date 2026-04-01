@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::error::{Error, Result};
 use crate::osc::{Arg, OscClient};
 use crate::track::Track;
+use crate::transport::Transport;
 
 /// A return track in the session.
 #[derive(Clone)]
@@ -89,14 +90,19 @@ pub struct Session {
 }
 
 impl Session {
-    /// Connect to AbletonOSC with custom host/ports.
-    pub fn new(host: &str, send_port: u16, recv_port: u16) -> Result<Self> {
-        Ok(Self { osc: OscClient::new(host, send_port, recv_port)? })
+    /// Connect to AbletonOSC with custom host/port via direct UDP.
+    pub fn new(host: &str, send_port: u16) -> Result<Self> {
+        Ok(Self { osc: OscClient::udp(host, send_port)? })
     }
 
-    /// Connect with default settings (localhost:11000/11001).
+    /// Connect with default settings (localhost:11000, direct UDP).
     pub fn connect() -> Result<Self> {
-        Self::new("127.0.0.1", 11000, 11001)
+        Ok(Self { osc: OscClient::connect()? })
+    }
+
+    /// Create a session backed by a custom transport (e.g., daemon proxy).
+    pub fn with_transport(transport: impl Transport + 'static) -> Self {
+        Self { osc: OscClient::from_transport(transport) }
     }
 
     /// Get the underlying OscClient for raw access.

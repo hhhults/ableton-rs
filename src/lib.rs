@@ -43,6 +43,8 @@ pub mod live;
 pub mod osc;
 pub mod session;
 pub mod track;
+pub mod transport;
+pub mod udp;
 
 pub use clip::{Clip, Note};
 pub use compiler::{CompileResult, IrPatch};
@@ -52,3 +54,4 @@ pub use live::{LiveSession, UpdateKind, UpdateResult};
 pub use osc::{Arg, OscClient};
 pub use session::{ReturnTrack, Scene, Session};
 pub use track::Track;
+pub use transport::Transport;

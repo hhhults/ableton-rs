@@ -1,19 +1,20 @@
-//! Low-level OSC transport over UDP.
+//! OSC argument types and client abstraction.
 //!
-//! Sends messages to AbletonOSC on port 11000, receives responses on port 11001.
-//! Uses a background thread to receive responses and dispatch them to waiters.
+//! [`OscClient`] wraps a pluggable [`Transport`](crate::transport::Transport),
+//! providing a uniform API whether backed by direct UDP or a daemon proxy.
 
-use std::collections::HashMap;
-use std::net::UdpSocket;
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
-use rosc::{OscMessage, OscPacket, OscType};
+use rosc::OscType;
+use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
+use crate::transport::Transport;
+use crate::udp::UdpTransport;
 
 /// A single OSC argument value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Arg {
     Int(i32),
     Float(f32),
@@ -96,81 +97,46 @@ impl From<bool> for Arg {
     fn from(v: bool) -> Self { Arg::Int(v as i32) }
 }
 
-fn osc_type_to_arg(t: OscType) -> Arg {
-    match t {
-        OscType::Int(v) => Arg::Int(v),
-        OscType::Float(v) => Arg::Float(v),
-        OscType::String(v) => Arg::String(v),
-        OscType::Double(v) => Arg::Double(v),
-        OscType::Long(v) => Arg::Long(v),
-        OscType::Bool(v) => Arg::Int(v as i32),
-        _ => Arg::Nil,
-    }
-}
-
-type ResponseSlot = Arc<Mutex<Option<Vec<Arg>>>>;
-
-/// Shared state between the sender and the receiver thread.
-struct Inner {
-    /// Pending waiters: address → (condvar, response slot).
-    waiters: Mutex<HashMap<String, (Arc<Condvar>, ResponseSlot)>>,
-}
-
-/// Low-level OSC client. Thread-safe, clone-cheap.
+/// Thread-safe OSC client backed by a pluggable transport.
+///
+/// Clone is cheap (Arc'd transport).
 #[derive(Clone)]
 pub struct OscClient {
-    send_socket: Arc<UdpSocket>,
-    send_addr: String,
-    inner: Arc<Inner>,
+    transport: Arc<dyn Transport>,
     pub default_timeout: Duration,
 }
 
 impl OscClient {
-    /// Connect to AbletonOSC.
-    pub fn new(host: &str, send_port: u16, recv_port: u16) -> Result<Self> {
-        let recv_socket = UdpSocket::bind(format!("{host}:{recv_port}"))?;
-        recv_socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+    /// Connect to AbletonOSC via direct UDP (localhost:11000).
+    pub fn connect() -> Result<Self> {
+        Self::udp("127.0.0.1", 11000)
+    }
 
-        let send_socket = UdpSocket::bind("0.0.0.0:0")?;
-
-        let inner = Arc::new(Inner {
-            waiters: Mutex::new(HashMap::new()),
-        });
-
-        // Spawn receiver thread
-        let inner2 = inner.clone();
-        std::thread::Builder::new()
-            .name("ableton-osc-recv".into())
-            .spawn(move || recv_loop(recv_socket, inner2))?;
-
+    /// Connect to AbletonOSC at the given host and port via UDP.
+    pub fn udp(host: &str, send_port: u16) -> Result<Self> {
+        let transport = UdpTransport::new(host, send_port)?;
         Ok(Self {
-            send_socket: Arc::new(send_socket),
-            send_addr: format!("{host}:{send_port}"),
-            inner,
+            transport: Arc::new(transport),
             default_timeout: Duration::from_secs(2),
         })
     }
 
-    /// Connect with default ports (11000/11001).
-    pub fn connect() -> Result<Self> {
-        Self::new("127.0.0.1", 11000, 11001)
+    /// Create a client backed by any transport.
+    pub fn from_transport(transport: impl Transport + 'static) -> Self {
+        Self {
+            transport: Arc::new(transport),
+            default_timeout: Duration::from_secs(2),
+        }
     }
 
     /// Send a fire-and-forget message.
     pub fn send(&self, address: &str, args: &[Arg]) -> Result<()> {
-        let msg = OscPacket::Message(OscMessage {
-            addr: address.to_string(),
-            args: args.iter().cloned().map(|a| a.into_osc()).collect(),
-        });
-        let buf = rosc::encoder::encode(&msg)
-            .map_err(|e| Error::OscDecode(format!("{e:?}")))?;
-        self.send_socket.send_to(&buf, &self.send_addr)?;
-        Ok(())
+        self.transport.send(address, args)
     }
 
     /// Send a message and wait for a response.
     pub fn query(&self, address: &str, args: &[Arg]) -> Result<Vec<Arg>> {
-        self.query_timeout(address, args, self.default_timeout)
+        self.transport.query_timeout(address, args, self.default_timeout)
     }
 
     /// Send a message and wait for a response with custom timeout.
@@ -180,80 +146,7 @@ impl OscClient {
         args: &[Arg],
         timeout: Duration,
     ) -> Result<Vec<Arg>> {
-        let cvar = Arc::new(Condvar::new());
-        let slot: ResponseSlot = Arc::new(Mutex::new(None));
-
-        // Register waiter
-        {
-            let mut waiters = self.inner.waiters.lock().unwrap();
-            waiters.insert(address.to_string(), (cvar.clone(), slot.clone()));
-        }
-
-        // Send the query
-        self.send(address, args)?;
-
-        // Wait for response
-        let deadline = Instant::now() + timeout;
-        let mut guard = slot.lock().unwrap();
-        loop {
-            if guard.is_some() {
-                break;
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                // Cleanup waiter
-                self.inner.waiters.lock().unwrap().remove(address);
-                return Err(Error::Timeout {
-                    address: address.to_string(),
-                });
-            }
-            let (new_guard, _timeout_result) = cvar.wait_timeout(guard, remaining).unwrap();
-            guard = new_guard;
-        }
-
-        // Cleanup waiter
-        self.inner.waiters.lock().unwrap().remove(address);
-
-        Ok(guard.take().unwrap())
-    }
-}
-
-fn recv_loop(socket: UdpSocket, inner: Arc<Inner>) {
-    let mut buf = [0u8; 65536];
-    loop {
-        match socket.recv_from(&mut buf) {
-            Ok((size, _src)) => {
-                if let Ok((_, packet)) = rosc::decoder::decode_udp(&buf[..size]) {
-                    dispatch_packet(&inner, packet);
-                }
-            }
-            Err(ref e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(_) => {
-                // Socket closed or fatal error — exit thread
-                break;
-            }
-        }
-    }
-}
-
-fn dispatch_packet(inner: &Inner, packet: OscPacket) {
-    match packet {
-        OscPacket::Message(msg) => {
-            let args: Vec<Arg> = msg.args.into_iter().map(osc_type_to_arg).collect();
-            let waiters = inner.waiters.lock().unwrap();
-            if let Some((cvar, slot)) = waiters.get(&msg.addr) {
-                let mut slot = slot.lock().unwrap();
-                *slot = Some(args);
-                cvar.notify_one();
-            }
-        }
-        OscPacket::Bundle(bundle) => {
-            for p in bundle.content {
-                dispatch_packet(inner, p);
-            }
-        }
+        self.transport.query_timeout(address, args, timeout)
     }
 }
 
@@ -272,9 +165,20 @@ mod tests {
 
     #[test]
     fn arg_cross_conversions() {
-        // Float → i32
         assert_eq!(Arg::Float(3.7).as_i32(), Some(3));
-        // Int → f32
         assert_eq!(Arg::Int(42).as_f32(), Some(42.0));
+    }
+
+    #[test]
+    fn arg_serde_roundtrip() {
+        let args = vec![
+            Arg::Int(42),
+            Arg::Float(3.14),
+            Arg::String("hello".into()),
+            Arg::Nil,
+        ];
+        let json = serde_json::to_string(&args).unwrap();
+        let parsed: Vec<Arg> = serde_json::from_str(&json).unwrap();
+        assert_eq!(args, parsed);
     }
 }
