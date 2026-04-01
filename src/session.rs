@@ -296,6 +296,30 @@ impl Session {
         self.osc.send("/live/scene/fire", &[Arg::Int(index)])
     }
 
+    /// Batch-query volume, panning, mute, solo, arm for all tracks at once.
+    /// Returns Vec of (volume, pan, mute, solo, arm) — one per track.
+    pub fn batch_track_info(&self, count: i32) -> Result<Vec<(f32, f32, bool, bool, bool)>> {
+        let mut queries = Vec::new();
+        for i in 0..count {
+            queries.push(("/live/track/get/volume".to_string(), vec![Arg::Int(i)]));
+            queries.push(("/live/track/get/panning".to_string(), vec![Arg::Int(i)]));
+            queries.push(("/live/track/get/mute".to_string(), vec![Arg::Int(i)]));
+            queries.push(("/live/track/get/solo".to_string(), vec![Arg::Int(i)]));
+            queries.push(("/live/track/get/arm".to_string(), vec![Arg::Int(i)]));
+        }
+        let results = self.osc.batch_query(&queries)?;
+        let mut info = Vec::new();
+        for chunk in results.chunks(5) {
+            let vol = chunk[0].get(1).and_then(|a| a.as_f32()).unwrap_or(0.85);
+            let pan = chunk[1].get(1).and_then(|a| a.as_f32()).unwrap_or(0.0);
+            let mute = chunk[2].get(1).and_then(|a| a.as_bool()).unwrap_or(false);
+            let solo = chunk[3].get(1).and_then(|a| a.as_bool()).unwrap_or(false);
+            let arm = chunk[4].get(1).and_then(|a| a.as_bool()).unwrap_or(false);
+            info.push((vol, pan, mute, solo, arm));
+        }
+        Ok(info)
+    }
+
     // -----------------------------------------------------------------------
     // View
     // -----------------------------------------------------------------------

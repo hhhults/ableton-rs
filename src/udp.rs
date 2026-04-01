@@ -125,6 +125,77 @@ impl Transport for UdpTransport {
 
         Ok(guard.take().unwrap())
     }
+
+    /// Optimized batch: register all waiters and send all queries while holding the
+    /// waiter lock (ensures FIFO ordering matches send ordering), then collect responses.
+    /// All queries land in AbletonOSC's socket buffer before the next tick, so they're
+    /// all processed in one ~100ms cycle instead of one cycle each.
+    fn batch_query_timeout(
+        &self,
+        queries: &[(String, Vec<Arg>)],
+        timeout: Duration,
+    ) -> Result<Vec<Vec<Arg>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut slots: Vec<(String, Arc<Condvar>, ResponseSlot)> = Vec::with_capacity(queries.len());
+
+        // Register all waiters and send all queries atomically
+        {
+            let mut waiters = self.inner.waiters.lock().unwrap();
+            for (address, args) in queries {
+                let cvar = Arc::new(Condvar::new());
+                let slot: ResponseSlot = Arc::new(Mutex::new(None));
+                waiters
+                    .entry(address.clone())
+                    .or_default()
+                    .push_back((cvar.clone(), slot.clone()));
+                slots.push((address.clone(), cvar, slot));
+
+                // Send immediately (UDP send_to is non-blocking)
+                let msg = OscPacket::Message(OscMessage {
+                    addr: address.clone(),
+                    args: args.iter().cloned().map(|a| a.into_osc()).collect(),
+                });
+                if let Ok(buf) = rosc::encoder::encode(&msg) {
+                    let _ = self.socket.send_to(&buf, &self.send_addr);
+                }
+            }
+        }
+
+        // Collect all responses
+        let deadline = Instant::now() + timeout;
+        let mut results = Vec::with_capacity(slots.len());
+
+        for (address, cvar, slot) in &slots {
+            let mut guard = slot.lock().unwrap();
+            loop {
+                if guard.is_some() {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    // Clean up remaining waiters
+                    let mut waiters = self.inner.waiters.lock().unwrap();
+                    if let Some(queue) = waiters.get_mut(address) {
+                        queue.retain(|(c, _)| !Arc::ptr_eq(c, cvar));
+                        if queue.is_empty() {
+                            waiters.remove(address);
+                        }
+                    }
+                    return Err(Error::Timeout {
+                        address: address.clone(),
+                    });
+                }
+                let (new_guard, _) = cvar.wait_timeout(guard, remaining).unwrap();
+                guard = new_guard;
+            }
+            results.push(guard.take().unwrap());
+        }
+
+        Ok(results)
+    }
 }
 
 fn recv_loop(socket: Arc<UdpSocket>, inner: Arc<Inner>) {

@@ -15,4 +15,19 @@ pub trait Transport: Send + Sync {
 
     /// Send a message and wait for a response with a timeout.
     fn query_timeout(&self, address: &str, args: &[Arg], timeout: Duration) -> Result<Vec<Arg>>;
+
+    /// Send multiple queries at once and collect all responses.
+    /// Default implementation sends sequentially. UdpTransport overrides with
+    /// an optimized version that sends all queries in one batch so AbletonOSC
+    /// processes them all in a single tick (~100ms total instead of ~100ms each).
+    fn batch_query_timeout(
+        &self,
+        queries: &[(String, Vec<Arg>)],
+        timeout: Duration,
+    ) -> Result<Vec<Vec<Arg>>> {
+        queries
+            .iter()
+            .map(|(addr, args)| self.query_timeout(addr, args, timeout))
+            .collect()
+    }
 }

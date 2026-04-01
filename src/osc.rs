@@ -148,6 +148,25 @@ impl OscClient {
     ) -> Result<Vec<Arg>> {
         self.transport.query_timeout(address, args, timeout)
     }
+
+    /// Send multiple queries at once and collect all responses.
+    /// With UdpTransport, all queries are batched into one AbletonOSC tick cycle.
+    pub fn batch_query(
+        &self,
+        queries: &[(String, Vec<Arg>)],
+    ) -> Result<Vec<Vec<Arg>>> {
+        self.transport
+            .batch_query_timeout(queries, self.default_timeout)
+    }
+
+    /// Send multiple queries with custom timeout.
+    pub fn batch_query_timeout(
+        &self,
+        queries: &[(String, Vec<Arg>)],
+        timeout: Duration,
+    ) -> Result<Vec<Vec<Arg>>> {
+        self.transport.batch_query_timeout(queries, timeout)
+    }
 }
 
 #[cfg(test)]
