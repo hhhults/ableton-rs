@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::UdpSocket;
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,11 +22,18 @@ use crate::transport::Transport;
 type ResponseSlot = Arc<Mutex<Option<Vec<Arg>>>>;
 type WaiterEntry = (Arc<Condvar>, ResponseSlot);
 
+/// A listener message: (osc_address, args).
+pub type ListenerMessage = (String, Vec<Arg>);
+
 /// Shared state between the sender and the receiver thread.
 struct Inner {
     /// Pending waiters: address → FIFO queue of (condvar, response slot).
     /// Multiple concurrent queries to the same address each get their own slot.
     waiters: Mutex<HashMap<String, VecDeque<WaiterEntry>>>,
+    /// Listener channels: prefix → sender.
+    /// Messages whose address starts with the prefix (and have no pending waiter)
+    /// are forwarded to the listener channel.
+    listeners: Mutex<Vec<(String, mpsc::Sender<ListenerMessage>)>>,
 }
 
 /// Direct OSC over UDP. Thread-safe, supports concurrent queries.
@@ -44,6 +52,7 @@ impl UdpTransport {
 
         let inner = Arc::new(Inner {
             waiters: Mutex::new(HashMap::new()),
+            listeners: Mutex::new(Vec::new()),
         });
 
         let recv_socket = socket.clone();
@@ -63,9 +72,27 @@ impl UdpTransport {
     pub fn connect() -> Result<Self> {
         Self::new("127.0.0.1", 11000)
     }
+
+    /// Register a listener for unsolicited OSC messages matching a prefix.
+    /// Returns a receiver that yields `(address, args)` for each matching message.
+    /// Messages that have a pending query waiter are NOT forwarded to listeners
+    /// (query responses take priority).
+    pub fn register_listener(&self, prefix: &str) -> mpsc::Receiver<ListenerMessage> {
+        let (tx, rx) = mpsc::channel();
+        self.inner
+            .listeners
+            .lock()
+            .unwrap()
+            .push((prefix.to_string(), tx));
+        rx
+    }
 }
 
 impl Transport for UdpTransport {
+    fn register_listener(&self, prefix: &str) -> Option<mpsc::Receiver<ListenerMessage>> {
+        Some(self.register_listener(prefix))
+    }
+
     fn send(&self, address: &str, args: &[Arg]) -> Result<()> {
         let msg = OscPacket::Message(OscMessage {
             addr: address.to_string(),
@@ -231,6 +258,15 @@ fn dispatch_packet(inner: &Inner, packet: OscPacket) {
                 }
                 if queue.is_empty() {
                     waiters.remove(&msg.addr);
+                }
+            } else {
+                // No pending waiter — check listeners
+                drop(waiters); // release waiter lock before acquiring listener lock
+                let listeners = inner.listeners.lock().unwrap();
+                for (prefix, tx) in listeners.iter() {
+                    if msg.addr.starts_with(prefix.as_str()) {
+                        let _ = tx.send((msg.addr.clone(), args.clone()));
+                    }
                 }
             }
         }

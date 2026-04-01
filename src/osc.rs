@@ -3,7 +3,7 @@
 //! [`OscClient`] wraps a pluggable [`Transport`](crate::transport::Transport),
 //! providing a uniform API whether backed by direct UDP or a daemon proxy.
 
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use rosc::OscType;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::transport::Transport;
-use crate::udp::UdpTransport;
+use crate::udp::{ListenerMessage, UdpTransport};
 
 /// A single OSC argument value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,6 +157,12 @@ impl OscClient {
     ) -> Result<Vec<Vec<Arg>>> {
         self.transport
             .batch_query_timeout(queries, self.default_timeout)
+    }
+
+    /// Register a listener for unsolicited OSC messages matching a prefix.
+    /// Returns None if the underlying transport doesn't support listeners.
+    pub fn register_listener(&self, prefix: &str) -> Option<mpsc::Receiver<ListenerMessage>> {
+        self.transport.register_listener(prefix)
     }
 
     /// Send multiple queries with custom timeout.
