@@ -289,3 +289,119 @@ fn osc_type_to_arg(t: OscType) -> Arg {
         _ => Arg::Nil,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_inner() -> Inner {
+        Inner {
+            waiters: Mutex::new(HashMap::new()),
+            listeners: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn make_osc_message(addr: &str, args: Vec<OscType>) -> OscPacket {
+        OscPacket::Message(OscMessage {
+            addr: addr.to_string(),
+            args,
+        })
+    }
+
+    #[test]
+    fn dispatch_to_waiter() {
+        let inner = make_inner();
+        let cvar = Arc::new(Condvar::new());
+        let slot: ResponseSlot = Arc::new(Mutex::new(None));
+        inner.waiters.lock().unwrap()
+            .entry("/live/test".into())
+            .or_default()
+            .push_back((cvar.clone(), slot.clone()));
+
+        dispatch_packet(&inner, make_osc_message("/live/test", vec![OscType::Int(42)]));
+
+        let result = slot.lock().unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.as_ref().unwrap()[0], Arg::Int(42));
+    }
+
+    #[test]
+    fn dispatch_to_listener_when_no_waiter() {
+        let inner = make_inner();
+        let (tx, rx) = mpsc::channel();
+        inner.listeners.lock().unwrap().push(("/live/".into(), tx));
+
+        dispatch_packet(&inner, make_osc_message("/live/track/get/volume", vec![OscType::Int(0), OscType::Float(0.75)]));
+
+        let (addr, args) = rx.recv().unwrap();
+        assert_eq!(addr, "/live/track/get/volume");
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], Arg::Int(0));
+        assert_eq!(args[1], Arg::Float(0.75));
+    }
+
+    #[test]
+    fn waiter_takes_priority_over_listener() {
+        let inner = make_inner();
+
+        // Register both a waiter and a listener for the same address
+        let cvar = Arc::new(Condvar::new());
+        let slot: ResponseSlot = Arc::new(Mutex::new(None));
+        inner.waiters.lock().unwrap()
+            .entry("/live/track/get/volume".into())
+            .or_default()
+            .push_back((cvar.clone(), slot.clone()));
+
+        let (tx, rx) = mpsc::channel();
+        inner.listeners.lock().unwrap().push(("/live/".into(), tx));
+
+        dispatch_packet(&inner, make_osc_message("/live/track/get/volume", vec![OscType::Float(0.5)]));
+
+        // Waiter should get it
+        assert!(slot.lock().unwrap().is_some());
+        // Listener should NOT get it
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn listener_prefix_matching() {
+        let inner = make_inner();
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        inner.listeners.lock().unwrap().push(("/live/track/".into(), tx1));
+        inner.listeners.lock().unwrap().push(("/live/song/".into(), tx2));
+
+        dispatch_packet(&inner, make_osc_message("/live/track/get/volume", vec![]));
+
+        assert!(rx1.try_recv().is_ok()); // matches /live/track/
+        assert!(rx2.try_recv().is_err()); // doesn't match /live/song/
+    }
+
+    #[test]
+    fn unmatched_message_dropped() {
+        let inner = make_inner();
+        // No waiters, no listeners — should not panic
+        dispatch_packet(&inner, make_osc_message("/unknown/address", vec![OscType::Int(1)]));
+    }
+
+    #[test]
+    fn bundle_dispatches_all_messages() {
+        let inner = make_inner();
+        let (tx, rx) = mpsc::channel();
+        inner.listeners.lock().unwrap().push(("/live/".into(), tx));
+
+        let bundle = OscPacket::Bundle(rosc::OscBundle {
+            timetag: rosc::OscTime { seconds: 0, fractional: 0 },
+            content: vec![
+                make_osc_message("/live/a", vec![]),
+                make_osc_message("/live/b", vec![]),
+            ],
+        });
+        dispatch_packet(&inner, bundle);
+
+        let msgs: Vec<_> = rx.try_iter().collect();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].0, "/live/a");
+        assert_eq!(msgs[1].0, "/live/b");
+    }
+}
