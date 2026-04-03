@@ -1,3 +1,5 @@
+use crate::chain::Chain;
+use crate::drum_pad::DrumPad;
 use crate::error::{Error, Result};
 use crate::osc::{Arg, OscClient};
 
@@ -114,5 +116,65 @@ impl Device {
         let min = min_resp.get(idx).and_then(|a| a.as_f32()).unwrap_or(0.0);
         let max = max_resp.get(idx).and_then(|a| a.as_f32()).unwrap_or(1.0);
         Ok((min, max))
+    }
+
+    // -- Chains (Rack devices) --
+
+    pub fn num_chains(&self) -> Result<i32> {
+        let resp = self.osc.query("/live/device/get/num_chains", &self.prefix())?;
+        resp.get(2)
+            .and_then(|a| a.as_i32())
+            .ok_or_else(|| Error::BadResponse {
+                address: "/live/device/get/num_chains".into(),
+                expected: 3,
+                got: resp.len(),
+            })
+    }
+
+    pub fn chain_names(&self) -> Result<Vec<String>> {
+        let resp = self.osc.query("/live/device/get/chains/name", &self.prefix())?;
+        Ok(resp[2..].iter().filter_map(|a| a.as_str().map(String::from)).collect())
+    }
+
+    pub fn chain(&self, chain_idx: i32) -> Chain {
+        Chain {
+            osc: self.osc.clone(),
+            track_idx: self.track_idx,
+            device_idx: self.device_idx,
+            chain_idx,
+        }
+    }
+
+    pub fn chains(&self) -> Result<Vec<Chain>> {
+        let count = self.num_chains()?;
+        Ok((0..count)
+            .map(|i| Chain {
+                osc: self.osc.clone(),
+                track_idx: self.track_idx,
+                device_idx: self.device_idx,
+                chain_idx: i,
+            })
+            .collect())
+    }
+
+    // -- Drum Pads (Drum Rack) --
+
+    pub fn drum_pad_names(&self) -> Result<Vec<String>> {
+        let resp = self.osc.query("/live/device/get/drum_pads/name", &self.prefix())?;
+        Ok(resp[2..].iter().filter_map(|a| a.as_str().map(String::from)).collect())
+    }
+
+    pub fn drum_pad_notes(&self) -> Result<Vec<i32>> {
+        let resp = self.osc.query("/live/device/get/drum_pads/note", &self.prefix())?;
+        Ok(resp[2..].iter().filter_map(|a| a.as_i32()).collect())
+    }
+
+    pub fn drum_pad(&self, note: i32) -> DrumPad {
+        DrumPad {
+            osc: self.osc.clone(),
+            track_idx: self.track_idx,
+            device_idx: self.device_idx,
+            pad_note: note,
+        }
     }
 }

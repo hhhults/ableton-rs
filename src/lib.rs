@@ -35,9 +35,11 @@
 //! # Ok::<(), ableton::Error>(())
 //! ```
 
+pub mod chain;
 pub mod clip;
 pub mod compiler;
 pub mod device;
+pub mod drum_pad;
 pub mod error;
 pub mod live;
 pub mod osc;
@@ -46,13 +48,15 @@ pub mod track;
 pub mod transport;
 pub mod udp;
 
+pub use chain::{Chain, ChainDevice};
 pub use clip::{Clip, Note};
 pub use compiler::{CompileResult, IrPatch};
 pub use device::{Device, Param};
+pub use drum_pad::{DrumPad, DrumPadDevice};
 pub use error::{Error, Result};
 pub use live::{LiveSession, UpdateKind, UpdateResult};
 pub use osc::{Arg, OscClient};
-pub use session::{ReturnTrack, Scene, Session};
+pub use session::{ReturnTrack, ReturnTrackDevice, Scene, Session};
 pub use track::Track;
 pub use transport::Transport;
 pub use udp::ListenerMessage;
