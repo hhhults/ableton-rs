@@ -311,6 +311,29 @@ impl Session {
         Ok(resp.first().and_then(|a| a.as_i32()).unwrap_or(0))
     }
 
+    /// Query num_tracks with retries — used after track creation when Ableton
+    /// may still be processing and the first query can time out.
+    fn num_tracks_after_create(&self) -> Result<i32> {
+        let delays = [300, 500, 1000, 2000];
+        for (i, delay_ms) in delays.iter().enumerate() {
+            std::thread::sleep(Duration::from_millis(*delay_ms));
+            match self.osc.query_timeout(
+                "/live/song/get/num_tracks",
+                &[],
+                Duration::from_secs(3),
+            ) {
+                Ok(resp) => {
+                    return Ok(resp.first().and_then(|a| a.as_i32()).unwrap_or(0));
+                }
+                Err(Error::Timeout { .. }) if i < delays.len() - 1 => {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!()
+    }
+
     pub fn track(&self, idx: i32) -> Track {
         Track::new(self.osc.clone(), idx)
     }
@@ -327,22 +350,22 @@ impl Session {
 
     pub fn create_midi_track(&self, index: i32) -> Result<Track> {
         self.osc.send("/live/song/create_midi_track", &[Arg::Int(index)])?;
-        std::thread::sleep(Duration::from_millis(150));
         if index == -1 {
-            let n = self.num_tracks()?;
+            let n = self.num_tracks_after_create()?;
             Ok(Track::new(self.osc.clone(), n - 1))
         } else {
+            std::thread::sleep(Duration::from_millis(300));
             Ok(Track::new(self.osc.clone(), index))
         }
     }
 
     pub fn create_audio_track(&self, index: i32) -> Result<Track> {
         self.osc.send("/live/song/create_audio_track", &[Arg::Int(index)])?;
-        std::thread::sleep(Duration::from_millis(150));
         if index == -1 {
-            let n = self.num_tracks()?;
+            let n = self.num_tracks_after_create()?;
             Ok(Track::new(self.osc.clone(), n - 1))
         } else {
+            std::thread::sleep(Duration::from_millis(300));
             Ok(Track::new(self.osc.clone(), index))
         }
     }
@@ -520,5 +543,35 @@ impl Session {
             .and_then(|a| a.as_str())
             .map(String::from)
             .ok_or_else(|| Error::Ableton("no response from load_effect".into()))
+    }
+
+    /// Load a sample into a drum rack pad by name.
+    pub fn load_sample_pad(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: i32,
+        name: &str,
+    ) -> Result<String> {
+        let resp = self.osc.query_timeout(
+            "/live/browser/load_sample_pad",
+            &[
+                Arg::Int(track_idx),
+                Arg::Int(device_idx),
+                Arg::Int(pad_note),
+                Arg::from(name),
+            ],
+            Duration::from_secs(5),
+        )?;
+        if let Some(Arg::String(ref s)) = resp.first() {
+            if s == "error" {
+                let msg = resp.get(1).and_then(|a| a.as_str()).unwrap_or("unknown");
+                return Err(Error::Ableton(msg.to_string()));
+            }
+        }
+        resp.get(3)
+            .and_then(|a| a.as_str())
+            .map(String::from)
+            .ok_or_else(|| Error::Ableton("no response from load_sample_pad".into()))
     }
 }
