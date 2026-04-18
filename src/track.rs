@@ -143,6 +143,29 @@ impl Track {
         )
     }
 
+    /// Fire a clip slot with explicit launch params.
+    ///
+    /// `force_legato`: if true, the clip fires immediately respecting legato behavior.
+    /// `launch_quantization`: Live.Song.Quantization value (0 = q_no_q/immediate,
+    /// 4 = q_bar, 7 = q_quarter, 11 = q_sixteenth, etc). Pass `None` to use the
+    /// song's default.
+    pub fn fire_slot_ext(
+        &self,
+        slot_idx: i32,
+        force_legato: bool,
+        launch_quantization: Option<i32>,
+    ) -> Result<()> {
+        self.osc.send(
+            "/live/clip_slot/fire_ext",
+            &[
+                Arg::Int(self.track_idx),
+                Arg::Int(slot_idx),
+                Arg::Int(force_legato as i32),
+                Arg::Int(launch_quantization.unwrap_or(-1)),
+            ],
+        )
+    }
+
     pub fn has_clip(&self, slot_idx: i32) -> Result<bool> {
         let resp = self.osc.query(
             "/live/clip_slot/get/has_clip",
@@ -224,9 +247,65 @@ impl Track {
         Ok(resp[1..].iter().filter_map(|a| a.as_str().map(String::from)).collect())
     }
 
-    pub fn set_output_routing(&self, type_name: &str) -> Result<()> {
+    pub fn get_output_routing_type(&self) -> Result<String> {
+        let resp = self.query("/live/track/get/output_routing_type", &[])?;
+        Ok(resp.get(1).and_then(|a| a.as_str()).unwrap_or("Master").to_string())
+    }
+
+    pub fn set_output_routing_type(&self, type_name: &str) -> Result<()> {
         self.send("/live/track/set/output_routing_type", &[Arg::from(type_name)])
     }
+
+    /// Legacy alias
+    pub fn set_output_routing(&self, type_name: &str) -> Result<()> {
+        self.set_output_routing_type(type_name)
+    }
+
+    pub fn output_routing_channels(&self) -> Result<Vec<String>> {
+        let resp = self.query("/live/track/get/available_output_routing_channels", &[])?;
+        Ok(resp[1..].iter().filter_map(|a| a.as_str().map(String::from)).collect())
+    }
+
+    pub fn get_output_routing_channel(&self) -> Result<String> {
+        let resp = self.query("/live/track/get/output_routing_channel", &[])?;
+        Ok(resp.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string())
+    }
+
+    pub fn set_output_routing_channel(&self, channel_name: &str) -> Result<()> {
+        self.send("/live/track/set/output_routing_channel", &[Arg::from(channel_name)])
+    }
+
+    // -- Input routing --
+
+    pub fn input_routing_types(&self) -> Result<Vec<String>> {
+        let resp = self.query("/live/track/get/available_input_routing_types", &[])?;
+        Ok(resp[1..].iter().filter_map(|a| a.as_str().map(String::from)).collect())
+    }
+
+    pub fn get_input_routing_type(&self) -> Result<String> {
+        let resp = self.query("/live/track/get/input_routing_type", &[])?;
+        Ok(resp.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string())
+    }
+
+    pub fn set_input_routing_type(&self, type_name: &str) -> Result<()> {
+        self.send("/live/track/set/input_routing_type", &[Arg::from(type_name)])
+    }
+
+    pub fn input_routing_channels(&self) -> Result<Vec<String>> {
+        let resp = self.query("/live/track/get/available_input_routing_channels", &[])?;
+        Ok(resp[1..].iter().filter_map(|a| a.as_str().map(String::from)).collect())
+    }
+
+    pub fn get_input_routing_channel(&self) -> Result<String> {
+        let resp = self.query("/live/track/get/input_routing_channel", &[])?;
+        Ok(resp.get(1).and_then(|a| a.as_str()).unwrap_or("").to_string())
+    }
+
+    pub fn set_input_routing_channel(&self, channel_name: &str) -> Result<()> {
+        self.send("/live/track/set/input_routing_channel", &[Arg::from(channel_name)])
+    }
+
+    // -- Meters --
 
     /// Read the current output meter level (left channel, 0.0–1.0).
     pub fn get_output_meter(&self) -> Result<f32> {

@@ -414,6 +414,10 @@ impl Session {
         self.osc.send("/live/scene/fire", &[Arg::Int(index)])
     }
 
+    pub fn fire_clip(&self, track_idx: i32, clip_idx: i32) -> Result<()> {
+        self.osc.send("/live/clip_slot/fire", &[Arg::Int(track_idx), Arg::Int(clip_idx)])
+    }
+
     /// Batch-query volume, panning, mute, solo, arm for all tracks at once.
     /// Returns Vec of (volume, pan, mute, solo, arm) — one per track.
     pub fn batch_track_info(&self, count: i32) -> Result<Vec<(f32, f32, bool, bool, bool)>> {
@@ -561,7 +565,13 @@ impl Session {
                 Arg::Int(pad_note),
                 Arg::from(name),
             ],
-            Duration::from_secs(5),
+            Duration::from_secs(
+                std::env::var("MR_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5)
+                    .max(5),
+            ),
         )?;
         if let Some(Arg::String(ref s)) = resp.first() {
             if s == "error" {
@@ -573,5 +583,226 @@ impl Session {
             .and_then(|a| a.as_str())
             .map(String::from)
             .ok_or_else(|| Error::Ableton("no response from load_sample_pad".into()))
+    }
+
+    // ---------- Canonical primitives ----------
+
+    /// Capture currently playing clips into a new scene.
+    pub fn capture_and_insert_scene(&self) -> Result<()> {
+        self.osc.send("/live/song/capture_and_insert_scene", &[])
+    }
+
+    /// Move a device from one track to another at the given position.
+    pub fn move_device(
+        &self,
+        src_track: i32,
+        src_device: i32,
+        dest_track: i32,
+        dest_index: i32,
+    ) -> Result<()> {
+        self.osc.send(
+            "/live/song/move_device",
+            &[
+                Arg::Int(src_track),
+                Arg::Int(src_device),
+                Arg::Int(dest_track),
+                Arg::Int(dest_index),
+            ],
+        )
+    }
+
+    // ---------- Simpler slice manipulation ----------
+
+    fn simpler_path(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: Option<i32>,
+        chain_device_idx: Option<i32>,
+    ) -> Vec<Arg> {
+        let mut v = vec![Arg::Int(track_idx), Arg::Int(device_idx)];
+        if let Some(p) = pad_note {
+            v.push(Arg::Int(p));
+            if let Some(c) = chain_device_idx {
+                v.push(Arg::Int(c));
+            }
+        }
+        v
+    }
+
+    /// Get slice positions (in samples) for a Simpler instance.
+    pub fn simpler_slices(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: Option<i32>,
+    ) -> Result<Vec<f32>> {
+        let args = self.simpler_path(track_idx, device_idx, pad_note, None);
+        let resp = self.osc.query("/live/simpler/slice/get/times", &args)?;
+        // Response starts with the echoed path args; skip them
+        let skip = args.len();
+        Ok(resp.into_iter().skip(skip).filter_map(|a| a.as_f32()).collect())
+    }
+
+    pub fn simpler_insert_slice(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: Option<i32>,
+        time: f32,
+    ) -> Result<()> {
+        let mut args = self.simpler_path(track_idx, device_idx, pad_note, None);
+        args.push(Arg::Float(time));
+        self.osc.send("/live/simpler/slice/insert", &args)
+    }
+
+    pub fn simpler_clear_slices(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: Option<i32>,
+    ) -> Result<()> {
+        let args = self.simpler_path(track_idx, device_idx, pad_note, None);
+        self.osc.send("/live/simpler/slice/clear", &args)
+    }
+
+    pub fn simpler_reset_slices(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: Option<i32>,
+    ) -> Result<()> {
+        let args = self.simpler_path(track_idx, device_idx, pad_note, None);
+        self.osc.send("/live/simpler/slice/reset", &args)
+    }
+
+    pub fn simpler_playback_mode(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: Option<i32>,
+    ) -> Result<i32> {
+        let args = self.simpler_path(track_idx, device_idx, pad_note, None);
+        let resp = self.osc.query("/live/simpler/get/playback_mode", &args)?;
+        resp.into_iter()
+            .filter_map(|a| a.as_i32())
+            .last()
+            .ok_or_else(|| Error::Ableton("no response from playback_mode".into()))
+    }
+
+    pub fn simpler_set_playback_mode(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: Option<i32>,
+        mode: i32,
+    ) -> Result<()> {
+        let mut args = self.simpler_path(track_idx, device_idx, pad_note, None);
+        args.push(Arg::Int(mode));
+        self.osc.send("/live/simpler/set/playback_mode", &args)
+    }
+
+    pub fn simpler_sample_length(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: Option<i32>,
+    ) -> Result<f32> {
+        let args = self.simpler_path(track_idx, device_idx, pad_note, None);
+        let resp = self.osc.query("/live/simpler/sample/get/length", &args)?;
+        resp.into_iter()
+            .filter_map(|a| a.as_f32())
+            .last()
+            .ok_or_else(|| Error::Ableton("no response from simpler length".into()))
+    }
+
+    /// Hot-swap a device's preset in place by name, preserving the device slot
+    /// and its sends/automation. Uses browser.hotswap_target under the hood.
+    pub fn hotswap_device(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        preset_name: &str,
+    ) -> Result<String> {
+        let resp = self.osc.query_timeout(
+            "/live/browser/hotswap_device",
+            &[
+                Arg::Int(track_idx),
+                Arg::Int(device_idx),
+                Arg::from(preset_name),
+            ],
+            Duration::from_secs(
+                std::env::var("MR_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5)
+                    .max(5),
+            ),
+        )?;
+        if let Some(Arg::String(ref s)) = resp.first() {
+            if s == "error" {
+                let msg = resp.get(1).and_then(|a| a.as_str()).unwrap_or("unknown");
+                return Err(Error::Ableton(msg.to_string()));
+            }
+        }
+        resp.get(2)
+            .and_then(|a| a.as_str())
+            .map(String::from)
+            .ok_or_else(|| Error::Ableton("no response from hotswap_device".into()))
+    }
+
+    /// Load an empty Drum Rack onto a track.
+    pub fn load_drum_rack(&self, track_idx: i32) -> Result<String> {
+        let resp = self.osc.query_timeout(
+            "/live/browser/load_drum_rack",
+            &[Arg::Int(track_idx)],
+            Duration::from_secs(5),
+        )?;
+        if let Some(Arg::String(ref s)) = resp.first() {
+            if s == "error" {
+                let msg = resp.get(1).and_then(|a| a.as_str()).unwrap_or("unknown");
+                return Err(Error::Ableton(msg.to_string()));
+            }
+        }
+        resp.get(1)
+            .and_then(|a| a.as_str())
+            .map(String::from)
+            .ok_or_else(|| Error::Ableton("no response from load_drum_rack".into()))
+    }
+
+    /// Load an instrument or effect into a drum rack pad's chain.
+    pub fn load_device_pad(
+        &self,
+        track_idx: i32,
+        device_idx: i32,
+        pad_note: i32,
+        name: &str,
+    ) -> Result<String> {
+        let resp = self.osc.query_timeout(
+            "/live/browser/load_device_pad",
+            &[
+                Arg::Int(track_idx),
+                Arg::Int(device_idx),
+                Arg::Int(pad_note),
+                Arg::from(name),
+            ],
+            Duration::from_secs(
+                std::env::var("MR_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(5)
+                    .max(5),
+            ),
+        )?;
+        if let Some(Arg::String(ref s)) = resp.first() {
+            if s == "error" {
+                let msg = resp.get(1).and_then(|a| a.as_str()).unwrap_or("unknown");
+                return Err(Error::Ableton(msg.to_string()));
+            }
+        }
+        resp.get(3)
+            .and_then(|a| a.as_str())
+            .map(String::from)
+            .ok_or_else(|| Error::Ableton("no response from load_device_pad".into()))
     }
 }
